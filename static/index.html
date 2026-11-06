@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>System Resource & Log Monitor</title>
+<!-- Chart.js is the only frontend dependency, loaded from a CDN (no build step). -->
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<style>
+  :root {
+    color-scheme: light;
+    --page: #f9f9f7; --surface: #fcfcfb; --ink: #0b0b0b; --ink-2: #52514e; --muted: #898781;
+    --grid: #e1e0d9; --axis: #c3c2b7; --border: rgba(11,11,11,0.10);
+    --s1: #2a78d6; --s2: #eb6834; --s3: #1baf7a;            /* chart series, fixed order */
+    --good: #0ca30c; --warning: #fab219; --critical: #d03b3b; /* status colors, always with icon + label */
+    --hover: rgba(11,11,11,0.04); --selected: rgba(42,120,214,0.10);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      color-scheme: dark;
+      --page: #0d0d0d; --surface: #1a1a19; --ink: #f0efec; --ink-2: #c3c2b7; --muted: #898781;
+      --grid: #2c2c2a; --axis: #383835; --border: rgba(255,255,255,0.10);
+      --s1: #3987e5; --s2: #d95926; --s3: #199e70;
+      --critical: #e66767;
+      --hover: rgba(255,255,255,0.05); --selected: rgba(57,135,229,0.18);
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--page); color: var(--ink);
+         font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 1200px; margin: 0 auto; padding: 24px 20px 48px; }
+  header h1 { font-size: 22px; margin: 0 0 4px; }
+  header p { margin: 0 0 20px; color: var(--ink-2); }
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
+          padding: 16px 18px; margin-bottom: 18px; }
+  .card-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
+  h2 { font-size: 16px; margin: 0; }
+  .hint { color: var(--muted); font-weight: normal; font-size: 13px; }
+  table { width: 100%; border-collapse: collapse; }
+  th { text-align: left; font-weight: 600; color: var(--ink-2); font-size: 12px;
+       border-bottom: 1px solid var(--grid); padding: 6px 8px; }
+  td { border-bottom: 1px solid var(--grid); padding: 8px; vertical-align: top; }
+  tr:last-child td { border-bottom: none; }
+  .num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .sub { color: var(--muted); font-size: 12px; }
+  #machines tbody tr { cursor: pointer; }
+  #machines tbody tr:hover { background: var(--hover); }
+  #machines tbody tr.selected { background: var(--selected); }
+  .status { display: inline-flex; align-items: center; gap: 6px; font-weight: 600; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
+  .online .dot { background: var(--good); }
+  .offline .dot { background: var(--critical); }
+  .over { font-weight: 700; }
+  .icon-crit { color: var(--critical); }
+  .icon-warn { color: var(--warning); }
+  .icon-info { color: var(--muted); }
+  .charts { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 16px; }
+  figure { margin: 0; }
+  figcaption { font-weight: 600; margin-bottom: 6px; }
+  .chart-box { position: relative; height: 220px; }
+  select { font: inherit; padding: 4px 8px; border-radius: 6px; border: 1px solid var(--border);
+           background: var(--surface); color: var(--ink); }
+  .empty { color: var(--muted); padding: 12px 0; }
+  .error { color: var(--critical); font-weight: 600; }
+  .msg { word-break: break-word; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>System Resource &amp; Log Monitor</h1>
+    <p id="subtitle">Loading…</p>
+  </header>
+
+  <section class="card">
+    <div class="card-head"><h2>Machines <span class="hint" id="machine-count"></span></h2>
+      <span class="hint">Click a machine to see its trends</span></div>
+    <table id="machines">
+      <thead><tr>
+        <th>Status</th><th>Machine</th><th>Last seen</th>
+        <th class="num">CPU</th><th class="num">Memory</th><th class="num">Disk</th>
+        <th class="num">Net ↑ / ↓ KB/s</th>
+      </tr></thead>
+      <tbody></tbody>
+    </table>
+    <div class="empty" id="machines-empty" hidden>No agents have reported yet. Start one with <code>python agent.py</code>.</div>
+  </section>
+
+  <section class="card">
+    <div class="card-head">
+      <h2 id="trend-title">Trends</h2>
+      <label class="hint">Range
+        <select id="range">
+          <option value="15">Last 15 min</option>
+          <option value="30" selected>Last 30 min</option>
+          <option value="60">Last 1 hour</option>
+          <option value="360">Last 6 hours</option>
+        </select>
+      </label>
+    </div>
+    <div class="charts">
+      <figure><figcaption>Utilization (%)</figcaption><div class="chart-box"><canvas id="chart-util"></canvas></div></figure>
+      <figure><figcaption>Disk I/O (KB/s)</figcaption><div class="chart-box"><canvas id="chart-disk"></canvas></div></figure>
+      <figure><figcaption>Network (KB/s)</figcaption><div class="chart-box"><canvas id="chart-net"></canvas></div></figure>
+    </div>
+  </section>
+
+  <section class="card">
+    <div class="card-head"><h2>Recent events</h2><span class="hint">Threshold alerts, log errors, status changes</span></div>
+    <table id="events">
+      <thead><tr><th>Time</th><th>Machine</th><th>Type</th><th>Severity</th><th>Message</th></tr></thead>
+      <tbody></tbody>
+    </table>
+    <div class="empty" id="events-empty" hidden>No events yet.</div>
+  </section>
+</main>
+
+<script>
+const REFRESH_MS = 5000;
+let cfg = { cpu_alert: 80, mem_alert: 85, disk_alert: 90, offline_after: 15 };
+let selectedId = null;
+
+// ---------- helpers
+const css = name => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+const $ = sel => document.querySelector(sel);
+const esc = s => String(s ?? '').replace(/[&<>"']/g,
+  c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const fmt = v => v == null ? '–' : Number(v).toLocaleString(undefined, { maximumFractionDigits: 1 });
+const timeLabel = iso => new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+
+async function getJSON(url) {
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`${url} → HTTP ${res.status}`);
+  return res.json();
+}
+
+function ago(iso) {
+  const s = Math.max(0, Math.round((Date.now() - new Date(iso)) / 1000));
+  if (s < 60) return `${s}s ago`;
+  if (s < 3600) return `${Math.floor(s / 60)}m ago`;
+  return `${Math.floor(s / 3600)}h ago`;
+}
+
+// Percent cell; above threshold gets an icon + bold value (never color alone).
+function pctCell(value, limit) {
+  if (value == null) return '<td class="num">–</td>';
+  const over = value >= limit;
+  const icon = over ? '<span class="icon-crit" title="Above threshold">▲</span> ' : '';
+  return `<td class="num${over ? ' over' : ''}">${icon}${value.toFixed(1)}%</td>`;
+}
+
+// ---------- charts
+// Draws a thin vertical guide line at the hovered time (crosshair).
+const crosshair = {
+  id: 'crosshair',
+  afterDatasetsDraw(chart) {
+    const active = chart.tooltip?.getActiveElements?.() || [];
+    if (!active.length) return;
+    const x = active[0].element.x, { top, bottom } = chart.chartArea, ctx = chart.ctx;
+    ctx.save(); ctx.strokeStyle = css('--axis'); ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(x, top); ctx.lineTo(x, bottom); ctx.stroke(); ctx.restore();
+  }
+};
+
+function makeChart(canvasId, series, unit, yExtra = {}) {
+  return new Chart(document.getElementById(canvasId), {
+    type: 'line',
+    data: {
+      labels: [],
+      datasets: series.map(([label, key], i) => ({
+        label, key, data: [],
+        borderColor: css(`--s${i + 1}`), backgroundColor: css(`--s${i + 1}`),
+        borderWidth: 2, borderJoinStyle: 'round', borderCapStyle: 'round',
+        pointRadius: 0, pointHoverRadius: 5, pointHoverBorderWidth: 2, pointHoverBorderColor: css('--surface'),
+        tension: 0, spanGaps: true,
+      })),
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false, animation: false,
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: { position: 'top', align: 'start',
+                  labels: { color: css('--ink-2'), usePointStyle: true, pointStyle: 'line', boxWidth: 18 } },
+        tooltip: { callbacks: { label: c => ` ${c.dataset.label}: ${fmt(c.parsed.y)}${unit}` } },
+      },
+      scales: {
+        x: { ticks: { color: css('--muted'), maxTicksLimit: 6, maxRotation: 0 },
+             grid: { display: false }, border: { color: css('--axis') } },
+        y: { beginAtZero: true, ...yExtra,
+             ticks: { color: css('--muted'), maxTicksLimit: 5,
+                      callback: v => Math.abs(v) >= 10000 ? `${fmt(v / 1000)}K` : fmt(v) },
+             grid: { color: css('--grid') }, border: { display: false } },
+      },
+    },
+    plugins: [crosshair],
+  });
+}
+
+const charts = [
+  makeChart('chart-util', [['CPU', 'cpu_percent'], ['Memory', 'mem_percent'], ['Disk', 'disk_percent']], '%', { max: 100 }),
+  makeChart('chart-disk', [['Read', 'disk_read_kbps'], ['Write', 'disk_write_kbps']], ' KB/s'),
+  makeChart('chart-net', [['Sent', 'net_sent_kbps'], ['Received', 'net_recv_kbps']], ' KB/s'),
+];
+
+// ---------- data refresh
+async function refreshMachines() {
+  const machines = await getJSON('/api/machines');
+  if (selectedId == null && machines.length) selectedId = machines[0].id;
+
+  $('#machines-empty').hidden = machines.length > 0;
+  const online = machines.filter(m => m.status === 'online').length;
+  $('#machine-count').textContent = machines.length ? `${online} of ${machines.length} online` : '';
+
+  $('#machines tbody').innerHTML = machines.map(m => `
+    <tr data-id="${m.id}" tabindex="0" class="${m.id === selectedId ? 'selected' : ''}">
+      <td><span class="status ${m.status}"><span class="dot"></span>${m.status === 'online' ? 'Online' : 'Offline'}</span></td>
+      <td><b>${esc(m.hostname)}</b><div class="sub">${esc(m.ip_address)} · ${esc(m.os)}</div></td>
+      <td>${ago(m.last_seen)}</td>
+      ${pctCell(m.cpu_percent, cfg.cpu_alert)}
+      ${pctCell(m.mem_percent, cfg.mem_alert)}
+      ${pctCell(m.disk_percent, cfg.disk_alert)}
+      <td class="num">${fmt(m.net_sent_kbps)} / ${fmt(m.net_recv_kbps)}</td>
+    </tr>`).join('');
+
+  const sel = machines.find(m => m.id === selectedId);
+  $('#trend-title').textContent = sel ? `Trends: ${sel.hostname}` : 'Trends';
+}
+
+async function refreshTrends() {
+  if (selectedId == null) return;
+  const rows = await getJSON(`/api/machines/${selectedId}/metrics?minutes=${$('#range').value}`);
+  const labels = rows.map(r => timeLabel(r.ts));
+  for (const chart of charts) {
+    chart.data.labels = labels;
+    chart.data.datasets.forEach(ds => { ds.data = rows.map(r => r[ds.key]); });
+    chart.update('none');
+  }
+}
+
+const SEVERITY = {
+  INFO: ['ℹ', 'icon-info', 'Info'],
+  WARNING: ['▲', 'icon-warn', 'Warning'],
+  ERROR: ['✕', 'icon-crit', 'Error'],
+  CRITICAL: ['✕', 'icon-crit', 'Critical'],
+};
+
+async function refreshEvents() {
+  const events = await getJSON('/api/events?limit=50');
+  $('#events-empty').hidden = events.length > 0;
+  $('#events tbody').innerHTML = events.map(e => {
+    const [icon, cls, label] = SEVERITY[e.severity] || SEVERITY.INFO;
+    return `<tr>
+      <td class="num" style="text-align:left">${new Date(e.ts).toLocaleString()}</td>
+      <td>${esc(e.hostname)}</td>
+      <td>${esc(e.event_type)}</td>
+      <td><span class="${cls}">${icon}</span> ${label}</td>
+      <td class="msg">${esc(e.message)}</td>
+    </tr>`;
+  }).join('');
+}
+
+async function refreshAll() {
+  try {
+    await refreshMachines();
+    await Promise.all([refreshTrends(), refreshEvents()]);
+    $('#subtitle').textContent =
+      `Updated ${new Date().toLocaleTimeString()} · Alerts at CPU ${cfg.cpu_alert}%, memory ${cfg.mem_alert}%, ` +
+      `disk ${cfg.disk_alert}% · Offline after ${cfg.offline_after}s without data`;
+  } catch (err) {
+    $('#subtitle').innerHTML = `<span class="error">✕ Cannot reach the server</span> <span class="hint">(${esc(err.message)})</span>`;
+  }
+}
+
+// ---------- events
+function selectRow(tr) {
+  if (!tr) return;
+  selectedId = Number(tr.dataset.id);
+  refreshAll();
+}
+$('#machines tbody').addEventListener('click', e => selectRow(e.target.closest('tr')));
+$('#machines tbody').addEventListener('keydown', e => { if (e.key === 'Enter') selectRow(e.target.closest('tr')); });
+$('#range').addEventListener('change', refreshTrends);
+
+(async () => {
+  try { cfg = await getJSON('/api/config'); } catch (_) { /* keep defaults */ }
+  refreshAll();
+  setInterval(refreshAll, REFRESH_MS);
+})();
+</script>
+</body>
+</html>
